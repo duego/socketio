@@ -2,6 +2,7 @@ package socketio
 
 import (
 	"code.google.com/p/go.net/websocket"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -35,87 +36,122 @@ func socketIOUnmarshall(msg []byte, payloadType byte, v interface{}) (err error)
 	return websocket.ErrNotSupported
 }
 
-/*
+type Options struct {
+	HbTimeout time.Duration // Override what server says about heartbeat timeouts
+}
 
-Socket-io Protocol
+type SubscribeError struct {
+	msg string
+}
 
-GET /socket.io/1 HTTP/1.1
-Host: socketio.mtgox.com
-Connection: keep-alive
-Origin: null
+func (e SubscribeError) Error() string {
+	return e.msg
+}
 
-GET /socket.io/1/websocket/[SESSION-ID] HTTP/1.1
-Pragma: no-cache
-Origin: null
-Host: socketio.mtgox.com
-Upgrade: websocket
-Cache-Control: no-cache
-Connection: Upgrade
-
-Websocket Protocol
-
-GET /mtgox?Currency=USD HTTP/1.1
-Host: mtgox.mtgox.com
-Upgrade: websocket
-Connection: Upgrade
-Connection: keep-alive
-Origin: http://localhost/
-
-*/
-func Subscribe(ch chan<- string, url, channel string) {
+func Subscribe(rch chan<- string, wch <-chan string, url, channel string, o Options) error {
 	// Handshake Request
-	resp, _ := http.Get("http://" + url)
+	resp, err := http.Get("http://" + url)
+	if err != nil {
+		return err
+	}
 	defer resp.Body.Close()
+	defer close(rch)
+
 	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
 	bodyParts := strings.Split(string(body), ":")
+	if len(bodyParts) != 4 {
+		return SubscribeError{fmt.Sprintf("Received invalid body when handshaking: '%s'", body)}
+	}
 	// Agreed configs
 	sessionId := bodyParts[0]
-	heartbeatTimeout, _ := strconv.Atoi(bodyParts[1])
+
+	var heartbeatTimeout time.Duration
+	if o.HbTimeout > time.Second {
+		heartbeatTimeout = o.HbTimeout
+	} else {
+		if h, err := strconv.Atoi(bodyParts[1]); err != nil {
+			log.Fatal("Invalid timeout specified by server: ", err)
+		} else {
+			heartbeatTimeout = time.Duration(h) * time.Second
+		}
+	}
 	//connectionTimeout, _ := strconv.Atoi(bodyParts[2])
 	supportedProtocols := strings.Split(string(bodyParts[3]), ",")
-	
+
 	// Fail if websocket is not supported
-	for i := 0; i < len(supportedProtocols); i++{
+	for i := 0; i < len(supportedProtocols); i++ {
 		if supportedProtocols[i] == "websocket" {
 			break
 		} else if i == len(supportedProtocols)-1 {
-			log.Fatal("Websocket is not supported")
+			return SubscribeError{"Websocket is not supported"}
 		}
 	}
 
-	// Connect	
-	ws, err := websocket.Dial("ws://"+url+"/websocket/"+sessionId, "", "http://localhost/")
+	log.Print(bodyParts)
+
+	// Connect
+	wsEndpoint := strings.Join(
+		[]string{
+			strings.TrimSuffix(url, "/"),
+			"websocket",
+			sessionId},
+		"/")
+	ws, err := websocket.Dial("ws://"+wsEndpoint, "", "http://localhost/")
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
+	defer ws.Close()
 
-	// Initial handshake
-	if err := websocket.Message.Send(ws, "1::"+channel); err != nil {
-		log.Fatal(err)
-	}
-
-	// Send heartbeat in agreed timeout perios
+	// Setup channel for both internal packets and packets coming from wch
+	out := make(chan string)
 	go func() {
-		for {
-			time.Sleep(time.Duration(heartbeatTimeout-1) * time.Second)
-			if err := websocket.Message.Send(ws, "2::"); err != nil {
-				log.Fatal(err)
-			}
+		for s := range wch {
+			out <- s
 		}
 	}()
 
-	// Receive loop
-	var msg string
-	var SocketIOCodec = websocket.Codec{socketIOMarshall, socketIOUnmarshall}
-	for {
-		// Remove socketio headers
-		if err := SocketIOCodec.Receive(ws, &msg); err != nil {
-			log.Fatal(err)
+	// Send initial handshake and heartbeat in agreed timeout perios
+	go func() {
+		out <- "1::" + channel
+		for {
+			time.Sleep(heartbeatTimeout)
+			out <- "2::"
 		}
-		
-		// ignore emtpy data and handshakes
-		if len(msg) > 2 {
-			ch <- msg
+	}()
+
+	errch := make(chan error)
+	// Send/Receive loop
+	go func() {
+		var msg string
+		var SocketIOCodec = websocket.Codec{socketIOMarshall, socketIOUnmarshall}
+		for {
+			// Remove socketio headers
+			if err := SocketIOCodec.Receive(ws, &msg); err != nil {
+				errch <- err
+				return
+			}
+
+			log.Print("< ", msg)
+			rch <- msg
+		}
+	}()
+
+	for {
+		select {
+		case outgoing, ok := <-out:
+			if !ok {
+				return nil
+			}
+			log.Print("> ", outgoing)
+			if err := websocket.Message.Send(ws, outgoing); err != nil {
+				return err
+			}
+		case err := <-errch:
+			return err
 		}
 	}
 }

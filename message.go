@@ -74,6 +74,11 @@ func NewMessage(path, query, data string) *IOMessage {
 	return &IOMessage{Type: 3, Endpoint: NewEndpoint(path, query), Data: data}
 }
 
+// TODO: Make proper JSON marshalling
+func NewEvent(path, query, data string) *IOMessage {
+	return &IOMessage{Type: 5, Endpoint: NewEndpoint(path, query), Data: data}
+}
+
 func Parse(rawMessage string) *IOMessage {
 	return &IOMessage{}
 }
