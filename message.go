@@ -1,29 +1,27 @@
 package socketio
 
 import (
+	"fmt"
 	"strconv"
 )
 
 type IOMessage struct {
-	Type int
-	Id int 
+	Type     int
+	Id       int
 	Endpoint *IOEndpoint
-	Data string
+	Data     string
 }
 
 type IOEndpoint struct {
-	Path string
+	Path  string
 	Query string
 }
 
 func (e IOEndpoint) String() string {
-	return ""
-	//if e.Path != "" {
-	//	return ""
-	//} else if e.Query != "" {
-//		return e.Path
-//	}
-//	return e.Path + "?" + e.Query
+	if e.Query != "" {
+		return e.Path + "?" + e.Query
+	}
+	return e.Path
 }
 
 type Disconnect IOMessage
@@ -37,37 +35,43 @@ type Error IOMessage
 type Noop IOMessage
 
 func (m IOMessage) String() string {
-	raw := strconv.Itoa(m.Type) + ":"
-	if (m.Id != 0){
-		raw += strconv.Itoa(m.Id)
-	} 
-	raw += ":"
-	endpoinRaw := m.Endpoint.String()
-	raw += endpoinRaw 
+	var t,
+		id,
+		endpoint string
+
+	t = strconv.Itoa(m.Type)
+	if m.Id != 0 {
+		id = strconv.Itoa(m.Id)
+	}
+	if m.Endpoint != nil {
+		endpoint = m.Endpoint.String()
+	}
+	raw := fmt.Sprintf("%s:%s:%s", t, id, endpoint)
+
 	if m.Data != "" {
 		raw += ":" + m.Data
 	}
-	return raw 
+	return raw
 }
 
 func NewEndpoint(path, query string) *IOEndpoint {
-	return &IOEndpoint{Path:path, Query:query}
+	return &IOEndpoint{Path: path, Query: query}
 }
 
 func NewDisconnect() *IOMessage {
-	return &IOMessage{Type:0}
+	return &IOMessage{Type: 0}
 }
 
 func NewConnect(path, query string) *IOMessage {
-	return &IOMessage{Type:1, Endpoint:NewEndpoint(path, query)}
+	return &IOMessage{Type: 1, Endpoint: NewEndpoint(path, query)}
 }
 
 func NewHeartbeat() *IOMessage {
-	return &IOMessage{Type:2}
+	return &IOMessage{Type: 2}
 }
 
 func NewMessage(path, query, data string) *IOMessage {
-	return &IOMessage{Type:3, Endpoint:NewEndpoint(path, query), Data:data}
+	return &IOMessage{Type: 3, Endpoint: NewEndpoint(path, query), Data: data}
 }
 
 func Parse(rawMessage string) *IOMessage {
