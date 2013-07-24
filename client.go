@@ -146,8 +146,8 @@ func Subscribe(rch chan<- string, wch <-chan string, url, channel string, o Opti
 		}
 	}()
 
-	// Initial hello
-	if err := websocket.Message.Send(ws, "1::"); err != nil {
+	// Initial connect
+	if err := websocket.Message.Send(ws, NewConnect(channel, "").String()); err != nil {
 		return err
 	}
 
