@@ -55,7 +55,6 @@ func Subscribe(rch chan<- string, wch <-chan string, url, channel string, o Opti
 		return err
 	}
 	defer resp.Body.Close()
-	defer close(rch)
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
@@ -69,16 +68,6 @@ func Subscribe(rch chan<- string, wch <-chan string, url, channel string, o Opti
 	// Agreed configs
 	sessionId := bodyParts[0]
 
-	var heartbeatTimeout time.Duration
-	if o.HbTimeout > time.Second {
-		heartbeatTimeout = o.HbTimeout
-	} else {
-		if h, err := strconv.Atoi(bodyParts[1]); err != nil {
-			log.Fatal("Invalid timeout specified by server: ", err)
-		} else {
-			heartbeatTimeout = time.Duration(h) * time.Second
-		}
-	}
 	//connectionTimeout, _ := strconv.Atoi(bodyParts[2])
 	supportedProtocols := strings.Split(string(bodyParts[3]), ",")
 
@@ -106,26 +95,32 @@ func Subscribe(rch chan<- string, wch <-chan string, url, channel string, o Opti
 	}
 	defer ws.Close()
 
-	// Setup channel for both internal packets and packets coming from wch
-	out := make(chan string)
-	go func() {
-		for s := range wch {
-			out <- s
+	var heartbeatTimeout time.Duration
+	if o.HbTimeout > time.Second {
+		heartbeatTimeout = o.HbTimeout
+	} else {
+		if h, err := strconv.Atoi(bodyParts[1]); err != nil {
+			log.Fatal("Invalid timeout specified by server: ", err)
+		} else {
+			heartbeatTimeout = time.Duration(h) * time.Second
 		}
-	}()
+	}
+	pulse := time.NewTicker(heartbeatTimeout)
+	defer pulse.Stop()
 
-	// Send initial handshake and heartbeat in agreed timeout perios
+	out := make(chan string)
+	defer close(out)
+	// Send heartbeat in agreed timeout period
 	go func() {
-		out <- "1::" + channel
-		for {
-			time.Sleep(heartbeatTimeout)
+		for _ = range pulse.C {
 			out <- "2::"
 		}
 	}()
 
 	errch := make(chan error)
-	// Send/Receive loop
+	// Receive loop
 	go func() {
+		defer close(rch)
 		var msg string
 		var SocketIOCodec = websocket.Codec{socketIOMarshall, socketIOUnmarshall}
 		for {
@@ -135,21 +130,36 @@ func Subscribe(rch chan<- string, wch <-chan string, url, channel string, o Opti
 				return
 			}
 
-			log.Print("< ", msg)
+			log.Println("< ", msg)
 			rch <- msg
 		}
 	}()
 
+	// Send loop
+	go func() {
+		for outgoing := range out {
+			log.Println("> ", outgoing)
+			if err := websocket.Message.Send(ws, outgoing); err != nil {
+				errch <- err
+				return
+			}
+		}
+	}()
+
+	// Initial hello
+	if err := websocket.Message.Send(ws, "1::"); err != nil {
+		return err
+	}
+
 	for {
 		select {
-		case outgoing, ok := <-out:
+		case outgoing, ok := <-wch:
+			// Forward incoming strings to our outgoing channel
+			// Closing this channel stops the flow
 			if !ok {
 				return nil
 			}
-			log.Print("> ", outgoing)
-			if err := websocket.Message.Send(ws, outgoing); err != nil {
-				return err
-			}
+			out <- outgoing
 		case err := <-errch:
 			return err
 		}
